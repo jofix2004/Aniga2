@@ -1,0 +1,15 @@
+# Thư mục cache và file tạm thời
+__pycache__/
+.gradio/
+_model_cache/
+
+# File cấu hình cục bộ
+ensemble_config.json
+
+# Các file model lớn
+*.pt
+*.pth
+*.weights
+
+# Các file Jupyter Notebook checkpoint
+.ipynb_checkpoints/
