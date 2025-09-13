@@ -12,6 +12,9 @@ from pathlib import Path
 import os
 import torchvision.ops as ops
 from PIL import Image
+# <<< THÊM MỚI: Import cần thiết cho tạo mask chênh lệch >>>
+from skimage.metrics import structural_similarity as ssim
+
 try:
     from doctr.models import ocr_predictor
     DOCTR_AVAILABLE = True
@@ -100,24 +103,16 @@ def _check_containment_numba(box1, box2, thr):
     containment_ratio = inter_area / _get_box_area_numba(smaller)
     return containment_ratio >= thr
 
-# --- BẮT ĐẦU THÊM MỚI ---
 @jit(nopython=True, cache=True)
 def _is_box_a_inside_b_numba(box_a, box_b, containment_threshold=0.8):
-    """Kiểm tra xem tỷ lệ diện tích của box_a nằm trong box_b có đạt ngưỡng không."""
-    x1_inter = max(box_a[0], box_b[0])
-    y1_inter = max(box_a[1], box_b[1])
-    x2_inter = min(box_a[2], box_b[2])
-    y2_inter = min(box_a[3], box_b[3])
-
+    x1_inter = max(box_a[0], box_b[0]); y1_inter = max(box_a[1], box_b[1])
+    x2_inter = min(box_a[2], box_b[2]); y2_inter = min(box_a[3], box_b[3])
     inter_area = max(0.0, x2_inter - x1_inter) * max(0.0, y2_inter - y1_inter)
-    if inter_area == 0.0:
-        return False
-
+    if inter_area == 0.0: return False
     area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
-    if area_a == 0.0:
-        return False
-        
+    if area_a == 0.0: return False
     return (inter_area / area_a) >= containment_threshold
+
 # --- KẾT THÚC THÊM MỚI ---
 
 class AdvancedDetectionPipeline:
@@ -295,8 +290,7 @@ class AdvancedDetectionPipeline:
 # (Các hàm JIT và xử lý model đơn được giữ nguyên)
 @jit(nopython=True, cache=True)
 def _are_boxes_related_numba(box1_idx, box2_idx, boxes, iou_thr, containment_thr, similarity_map, iou_matrix):
-    box1 = boxes[box1_idx]; box2 = boxes[box2_idx]
-    cls1, cls2 = int(box1[5]), int(box2[5])
+    box1 = boxes[box1_idx]; box2 = boxes[box2_idx]; cls1, cls2 = int(box1[5]), int(box2[5])
     is_class_related = (cls1 == cls2)
     if not is_class_related:
         for k, v_list in similarity_map:
@@ -394,7 +388,7 @@ def process_single_model(model_obj, is_original, image_pil, image_bgr, params, r
         result_list[index] = inference_and_draw(model_obj, is_original, image_pil, image_bgr, params)
     except Exception as e:
         print(f"Lỗi khi suy luận model {index+1}: {e}"); result_list[index] = (image_bgr.copy(), f"Lỗi: {e}", [], {})
-
+        
 # --- LOGIC OCR ---
 def get_ocr_model(device_mode):
     global OCR_MODELS
@@ -490,3 +484,97 @@ def run_manga_ocr_on_boxes(image_np_bgr, final_boxes_from_ensemble, model_names,
             cv2.rectangle(ocr_visualization_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
     logs.insert(0, f"<b>Tổng thời gian OCR Pipeline (Manga-OCR): {time.perf_counter() - t_start:.4f}s</b>")
     return final_boxes_from_ensemble, ocr_visualization_image, "\n---\n".join(ocr_full_text_output), logs
+
+def create_mask_from_bboxes(image_shape, bboxes):
+    """Tạo một mask nhị phân từ danh sách bounding box."""
+    mask = np.zeros((image_shape[0], image_shape[1]), dtype=np.uint8)
+    if not bboxes:
+        return mask
+    for box in bboxes:
+        x1, y1, x2, y2 = map(int, box[:4])
+        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+    return mask
+
+def create_difference_mask(img_raw, img_clean, blur_level, min_area, cleanup_level):
+    """Tạo mask từ sự khác biệt pixel (Logic từ test.py)."""
+    h, w, _ = img_raw.shape
+    img_clean_resized = cv2.resize(img_clean, (w, h))
+    gray_raw = cv2.cvtColor(img_raw, cv2.COLOR_BGR2GRAY)
+    gray_clean = cv2.cvtColor(img_clean_resized, cv2.COLOR_BGR2GRAY)
+    blur_level = blur_level + 1 if blur_level % 2 == 0 else blur_level
+    blurred_raw = cv2.GaussianBlur(gray_raw, (blur_level, blur_level), 0)
+    blurred_clean = cv2.GaussianBlur(gray_clean, (blur_level, blur_level), 0)
+    (_, diff) = ssim(blurred_raw, blurred_clean, full=True)
+    diff = (diff * 255).astype("uint8")
+    thresh = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+    kernel_open = np.ones((3, 3), np.uint8)
+    mask_opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_open, iterations=2)
+    cleanup_level = cleanup_level + 1 if cleanup_level % 2 == 0 else cleanup_level
+    kernel_close = np.ones((cleanup_level, cleanup_level), np.uint8)
+    mask_closed = cv2.morphologyEx(mask_opened, cv2.MORPH_CLOSE, kernel_close, iterations=3)
+    contours, _ = cv2.findContours(mask_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    final_mask = np.zeros_like(mask_closed)
+    for cnt in contours:
+        if cv2.contourArea(cnt) > min_area:
+            cv2.drawContours(final_mask, [cnt], -1, (255), -1)
+    return final_mask
+
+def feather_mask(mask, expand_size, feather_amount):
+    """Làm mịn và mở rộng viền mask (Logic từ test.py)."""
+    expand_size = expand_size + 1 if expand_size % 2 == 0 else expand_size
+    feather_amount = feather_amount + 1 if feather_amount % 2 == 0 else feather_amount
+    if expand_size > 1:
+        kernel = np.ones((expand_size, expand_size), np.uint8)
+        dilated_mask = cv2.dilate(mask, kernel, iterations=1)
+    else:
+        dilated_mask = mask
+    if feather_amount > 1:
+        feathered_mask = cv2.GaussianBlur(dilated_mask, (feather_amount, feather_amount), 0)
+    else:
+        feathered_mask = dilated_mask
+    return feathered_mask
+
+def create_feathered_overlay(img_raw, img_clean, feathered_mask):
+    """Tạo ảnh overlay từ mask đã làm mịn (Logic từ test.py)."""
+    h, w, _ = img_raw.shape
+    img_clean_resized = cv2.resize(img_clean, (w, h))
+    alpha = cv2.cvtColor(feathered_mask, cv2.COLOR_GRAY2BGR).astype(float) / 255.0
+    img_raw_float = img_raw.astype(float)
+    img_clean_float = img_clean_resized.astype(float)
+    result_float = cv2.multiply(alpha, img_clean_float) + cv2.multiply(1.0 - alpha, img_raw_float)
+    return result_float.astype(np.uint8)
+
+
+# <<< --- BẮT ĐẦU CẬP NHẬT --- >>>
+def run_mask_generation_pipeline(raw_img_np, clean_img_np, selected_bboxes, unselected_bboxes, params):
+    """
+    Hàm điều phối chính cho việc tạo mask kết hợp với logic loại trừ thông minh.
+    """
+    # 1. Tạo mask từ bbox của các class ĐƯỢC CHỌN
+    yolo_mask_selected = create_mask_from_bboxes(raw_img_np.shape, selected_bboxes)
+
+    # 2. Tạo mask từ sự khác biệt pixel (như cũ)
+    blur, min_area, cleanup = params['blur'], params['min_area'], params['cleanup']
+    diff_mask = create_difference_mask(raw_img_np, clean_img_np, blur, min_area, cleanup)
+
+    # 3. BƯỚC MỚI: TẠO MASK LOẠI TRỪ TỪ CÁC CLASS KHÔNG ĐƯỢC CHỌN
+    # Tạo mask từ các bbox không được chọn
+    yolo_mask_unselected = create_mask_from_bboxes(raw_img_np.shape, unselected_bboxes)
+    # Đảo ngược mask này: vùng không được chọn -> đen, còn lại -> trắng
+    exclusion_mask = cv2.bitwise_not(yolo_mask_unselected)
+    
+    # Áp dụng loại trừ: chỉ giữ lại chênh lệch pixel NẾU nó không nằm trong vùng không được chọn
+    diff_mask_exclusive = cv2.bitwise_and(diff_mask, exclusion_mask)
+
+    # 4. ÁP DỤNG PHÉP TOÁN BITWISE AND (giữa mask được chọn và mask chênh lệch đã loại trừ)
+    combined_mask_unfeathered = cv2.bitwise_and(yolo_mask_selected, diff_mask_exclusive)
+
+    # 5. Áp dụng hiệu chỉnh (làm mịn, mở rộng) trên mask đã kết hợp
+    expand, feather = params['expand'], params['feather']
+    final_mask_feathered = feather_mask(combined_mask_unfeathered, expand, feather)
+
+    # 6. Tạo ảnh overlay cuối cùng để so sánh
+    overlay_image = create_feathered_overlay(raw_img_np, clean_img_np, final_mask_feathered)
+
+    # Trả về các ảnh để hiển thị (thay diff_mask bằng diff_mask_exclusive)
+    return yolo_mask_selected, diff_mask_exclusive, final_mask_feathered, overlay_image
