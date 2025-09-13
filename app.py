@@ -92,20 +92,45 @@ def main_predict_flow(click_start_time, *args):
         try:
             device_str = 'cuda:0' if device_mode == 'GPU' and torch.cuda.is_available() else 'cpu'
             target_device_obj = torch.device(device_str)
-            if cached_model is None or cached_model.get('temp_path') != temp_model_path or cached_model.get('device') != device_mode:
+            
+            # --- THAY ĐỔI LOGIC BẮT ĐẦU TỪ ĐÂY ---
+            # Xác định loại model được yêu cầu cho lần chạy NÀY
+            is_original_requested = (i == 1 and is_yolov9_original)
+
+            # Điều kiện vô hiệu hóa cache mới: thêm kiểm tra loại model cho model 2
+            should_reload_model = (
+                cached_model is None or
+                cached_model.get('temp_path') != temp_model_path or
+                cached_model.get('device') != device_mode or
+                (i == 1 and cached_model.get('is_original') != is_original_requested)
+            )
+
+            if should_reload_model:
+                if i == 1 and cached_model is not None and cached_model.get('is_original') != is_original_requested:
+                    log_messages.append(f"<b style='color:orange;'>- [Cache] Loại Model 2 đã thay đổi. Đang tải lại...</b>")
+
                 model_filename = os.path.basename(temp_model_path)
                 persistent_model_path = os.path.join(MODEL_CACHE_DIR, f"cached_model_{i+1}_{model_filename}")
                 if not os.path.exists(persistent_model_path) or not filecmp.cmp(temp_model_path, persistent_model_path, shallow=False):
                     shutil.copy(temp_model_path, persistent_model_path)
+                
                 log_messages.append(f"- Tải/Di chuyển Model {i+1} vào bộ nhớ ({device_mode})")
                 t_load_start = time.perf_counter()
-                is_original = (i == 1 and is_yolov9_original)
-                if is_original:
+                
+                if is_original_requested:
                     model_obj = DetectMultiBackend(persistent_model_path, device=target_device_obj, data=ROOT / 'data/coco.yaml')
                 else:
                     model_obj = YOLO(persistent_model_path)
                     model_obj.to(target_device_obj)
-                loaded_models[i] = {'path': persistent_model_path, 'temp_path': temp_model_path, 'model': model_obj, 'device': device_mode}
+                
+                # Lưu cả cờ is_original vào trong cache
+                loaded_models[i] = {
+                    'path': persistent_model_path, 
+                    'temp_path': temp_model_path, 
+                    'model': model_obj, 
+                    'device': device_mode, 
+                    'is_original': is_original_requested # <-- THÊM MỚI QUAN TRỌNG
+                }
                 log_messages.append(f"  + Hoàn thành sau: {time.perf_counter() - t_load_start:.4f}s")
             if loaded_models[i]: models_to_run[i] = loaded_models[i]['model']
         except Exception as e:
