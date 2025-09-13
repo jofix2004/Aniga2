@@ -12,6 +12,7 @@ from pathlib import Path
 import os
 import torchvision.ops as ops
 from PIL import Image
+# <<< THÊM MỚI: Import cần thiết cho tạo mask chênh lệch >>>
 from skimage.metrics import structural_similarity as ssim
 
 try:
@@ -42,12 +43,11 @@ except ImportError: YOLOV9_AVAILABLE = False
 OCR_MODELS = {}
 MANGA_OCR_MODELS = {}
 
-# --- CÁC HÀM TIỆN ÍCH VÀ VẼ ---
+# --- CÁC HÀM TIỆN ÍCH VÀ VẼ (Giữ nguyên) ---
 def hex_to_bgr(hex_color):
     try:
         rgb_float = to_rgb(hex_color); return (int(rgb_float[2] * 255), int(rgb_float[1] * 255), int(rgb_float[0] * 255))
     except (ValueError, TypeError): return (0, 255, 0)
-
 def update_color_preview(colors_json_str):
     try:
         colors_dict = json.loads(colors_json_str)
@@ -59,7 +59,6 @@ def update_color_preview(colors_json_str):
             html_output += f"<div><span style='{swatch_style}'></span><span style='{text_style}'>{class_name}</span></div>"
         return html_output if html_output else "<p>Chưa có màu nào.</p>"
     except Exception as e: return f"<p style='color: red;'>Lỗi cú pháp JSON: {e}</p>"
-
 def draw_custom_boxes(image_np, boxes, model_names, box_thickness, class_colors_str):
     img_draw = image_np.copy()
     try: custom_colors = json.loads(class_colors_str)
@@ -100,23 +99,21 @@ def _check_containment_numba(box1, box2, thr):
     bigger, smaller = (box1, box2) if area1 > area2 else (box2, box1)
     inter_x1, inter_y1 = max(bigger[0], smaller[0]), max(bigger[1], smaller[1])
     inter_x2, inter_y2 = min(bigger[2], smaller[2]), min(bigger[3], smaller[3])
-    inter_area = max(0.0, inter_x2 - inter_x1) * max(0.0, inter_y2 - y1_inter)
+    inter_area = max(0.0, inter_x2 - inter_x1) * max(0.0, inter_y2 - inter_y1)
     containment_ratio = inter_area / _get_box_area_numba(smaller)
     return containment_ratio >= thr
 
 @jit(nopython=True, cache=True)
 def _is_box_a_inside_b_numba(box_a, box_b, containment_threshold=0.8):
-    x1_inter = max(box_a[0], box_b[0])
-    y1_inter = max(box_a[1], box_b[1])
-    x2_inter = min(box_a[2], box_b[2])
-    y2_inter = min(box_a[3], box_b[3])
+    x1_inter = max(box_a[0], box_b[0]); y1_inter = max(box_a[1], box_b[1])
+    x2_inter = min(box_a[2], box_b[2]); y2_inter = min(box_a[3], box_b[3])
     inter_area = max(0.0, x2_inter - x1_inter) * max(0.0, y2_inter - y1_inter)
-    if inter_area == 0.0:
-        return False
+    if inter_area == 0.0: return False
     area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
-    if area_a == 0.0:
-        return False
+    if area_a == 0.0: return False
     return (inter_area / area_a) >= containment_threshold
+
+# --- KẾT THÚC THÊM MỚI ---
 
 class AdvancedDetectionPipeline:
     def __init__(self, class_mapping, config, image_size):
@@ -137,10 +134,12 @@ class AdvancedDetectionPipeline:
                 self.similarity_map_numba.append((float(k), v_list))
         self.intra_group_filterable_ids = {self.reverse_class_mapping.get(cn) for gn in self.config.get('intra_group_filtering_enabled_groups', []) if gn in groups for cn in groups[gn] if cn in self.reverse_class_mapping}
         self.class_id_to_group_name = {self.reverse_class_mapping.get(cn): gn for gn in self.config.get('intra_group_filtering_enabled_groups', []) if gn in groups for cn in groups[gn] if cn in self.reverse_class_mapping}
+        # --- BẮT ĐẦU THÊM MỚI ---
+        # Lấy ID cho các class cần thiết cho luật thưởng/phạt
         self.text_id = self.reverse_class_mapping.get('text', -1)
         self.text2_id = self.reverse_class_mapping.get('text2', -1)
         self.group_a_ids = {self.reverse_class_mapping.get(n) for n in groups.get('group_a', [])} - {None}
-
+        # --- KẾT THÚC THÊM MỚI ---
     def _custom_fusion(self, raw_results, iou_matrix_gpu):
         params = self.config['current_settings']; iou_thr = params['wbf_iou_thr']; containment_thr = params.get('parent_child_containment_thr', 0.8)
         all_boxes_list = List()
@@ -163,9 +162,13 @@ class AdvancedDetectionPipeline:
                 fused_boxes.append(fused_box)
         return [[b[0], b[1], b[2], b[3], b[4], int(b[5])] for b in fused_boxes]
 
+    # --- BẮT ĐẦU THÊM MỚI ---
     def _apply_containment_bonus_penalty(self, predictions):
+        """Áp dụng luật thưởng/phạt dựa trên vị trí tương đối."""
         if not predictions or not self.group_a_ids or (self.text_id == -1 and self.text2_id == -1):
             return predictions
+
+        # Phân loại các box để tối ưu hóa việc kiểm tra
         group_a_boxes, text_boxes, text2_boxes, other_boxes = [], [], [], []
         for p in predictions:
             class_id = p[5]
@@ -177,27 +180,37 @@ class AdvancedDetectionPipeline:
                 text2_boxes.append(p)
             else:
                 other_boxes.append(p)
+
         if not group_a_boxes:
             return predictions
+
         modified_predictions = []
+
+        # Xử lý text2 (bị phạt nếu nằm trong)
         for t2_box in text2_boxes:
             is_inside = False
             for a_box in group_a_boxes:
                 if _is_box_a_inside_b_numba(np.array(t2_box[:4]), np.array(a_box[:4])):
-                    t2_box[4] *= 0.7
+                    t2_box[4] *= 0.7  # Phạt 30%
                     is_inside = True
                     break
             modified_predictions.append(t2_box)
+            
+        # Xử lý text (được thưởng nếu nằm trong)
         for t_box in text_boxes:
             is_inside = False
             for a_box in group_a_boxes:
                 if _is_box_a_inside_b_numba(np.array(t_box[:4]), np.array(a_box[:4])):
-                    t_box[4] *= 1.3
+                    t_box[4] *= 1.3  # Thưởng 30%
+                    # Giới hạn điểm tin cậy không vượt quá 1.0
                     if t_box[4] > 1.0: t_box[4] = 1.0
                     is_inside = True
                     break
             modified_predictions.append(t_box)
+
+        # Gộp tất cả các box lại
         return modified_predictions + group_a_boxes + other_boxes
+    # --- KẾT THÚC THÊM MỚI ---
 
     def _filter_inter_class_overlap(self, predictions, iou_matrix_gpu):
         inter_class_iou_thr = self.config['current_settings']['ensemble_inter_class_iou_thr']
@@ -218,7 +231,6 @@ class AdvancedDetectionPipeline:
             keep_mask[i+1:][suppress_mask] = False
         kept_indices = torch.where(keep_mask)[0].cpu().numpy()
         return [preds_sorted[i] for i in kept_indices]
-
     def _filter_intra_group_overlap(self, predictions):
         iou_thr = self.config['current_settings']['ensemble_intra_group_iou_thr']
         preds_sorted = sorted(predictions, key=lambda x: x[4], reverse=True); to_keep = [True] * len(preds_sorted)
@@ -235,7 +247,9 @@ class AdvancedDetectionPipeline:
 
     def process(self, raw_results, device_mode):
         logs = []; t_start = time.perf_counter()
+        
         device = 'cuda' if device_mode == 'GPU' and torch.cuda.is_available() else 'cpu'
+
         t_step_start = time.perf_counter()
         all_boxes_for_iou = [box for res in raw_results for box in res]
         iou_matrix_gpu = torch.empty(0, 0, device=device)
@@ -243,22 +257,29 @@ class AdvancedDetectionPipeline:
             boxes_tensor = torch.tensor([b[:4] for b in all_boxes_for_iou], dtype=torch.float32).to(device)
             iou_matrix_gpu = ops.box_iou(boxes_tensor, boxes_tensor)
         logs.append(f"- Tính toán ma trận IoU ({len(all_boxes_for_iou)} boxes) trên {device.upper()}: {time.perf_counter() - t_step_start:.4f}s")
+        
         t_step_start = time.perf_counter()
         fused_preds = self._custom_fusion(raw_results, iou_matrix_gpu)
         logs.append(f"- Fusion & Gom cụm (Numba + Pre-computed IoU): {time.perf_counter() - t_step_start:.4f}s")
+        
+        # --- BẮT ĐẦU THÊM MỚI ---
         t_step_start = time.perf_counter()
         bonus_penalty_preds = self._apply_containment_bonus_penalty(fused_preds)
         logs.append(f"- Áp dụng Luật Thưởng/Phạt Vị trí (CPU Numba): {time.perf_counter() - t_step_start:.4f}s")
+        # --- KẾT THÚC THÊM MỚI ---
+
         t_step_start = time.perf_counter()
         inter_class_filtered_preds = []
-        if bonus_penalty_preds:
+        if bonus_penalty_preds: # <-- Sửa: Dùng kết quả từ bước thưởng/phạt
              fused_boxes_tensor = torch.tensor([p[:4] for p in bonus_penalty_preds], dtype=torch.float32).to(device)
              fused_iou_matrix_gpu = ops.box_iou(fused_boxes_tensor, fused_boxes_tensor)
-             inter_class_filtered_preds = self._filter_inter_class_overlap(bonus_penalty_preds, fused_iou_matrix_gpu)
+             inter_class_filtered_preds = self._filter_inter_class_overlap(bonus_penalty_preds, fused_iou_matrix_gpu) # <-- Sửa
         logs.append(f"- Lọc GIỮA các Nhóm ({device.upper()}-accelerated): {time.perf_counter() - t_step_start:.4f}s")
+        
         t_step_start = time.perf_counter()
         intra_group_filtered_preds = self._filter_intra_group_overlap(inter_class_filtered_preds)
         logs.append(f"- Lọc TRONG Nội Nhóm (CPU Numba): {time.perf_counter() - t_step_start:.4f}s")
+        
         t_step_start = time.perf_counter()
         final_conf_thr = self.config['current_settings'].get('final_conf_threshold', 0.0)
         final_preds = [p for p in intra_group_filtered_preds if p[4] >= final_conf_thr]
@@ -266,10 +287,10 @@ class AdvancedDetectionPipeline:
         logs.insert(0, f"<b>Tổng thời gian Pipeline: {time.perf_counter() - t_start:.4f}s</b>")
         return final_preds, logs
 
+# (Các hàm JIT và xử lý model đơn được giữ nguyên)
 @jit(nopython=True, cache=True)
 def _are_boxes_related_numba(box1_idx, box2_idx, boxes, iou_thr, containment_thr, similarity_map, iou_matrix):
-    box1 = boxes[box1_idx]; box2 = boxes[box2_idx]
-    cls1, cls2 = int(box1[5]), int(box2[5])
+    box1 = boxes[box1_idx]; box2 = boxes[box2_idx]; cls1, cls2 = int(box1[5]), int(box2[5])
     is_class_related = (cls1 == cls2)
     if not is_class_related:
         for k, v_list in similarity_map:
@@ -281,7 +302,6 @@ def _are_boxes_related_numba(box1_idx, box2_idx, boxes, iou_thr, containment_thr
     if iou_matrix[box1_idx, box2_idx] >= iou_thr: return True
     if _check_containment_numba(box1[:4], box2[:4], containment_thr): return True
     return False
-
 @jit(nopython=True, cache=True)
 def _cluster_boxes_smart_numba(boxes, iou_thr, containment_thr, similarity_map, iou_matrix):
     n_boxes = len(boxes); clusters = List(); visited = np.zeros(n_boxes, dtype=np.bool_)
@@ -295,7 +315,6 @@ def _cluster_boxes_smart_numba(boxes, iou_thr, containment_thr, similarity_map, 
                     visited[k] = True; q.append(k)
         clusters.append(current_cluster_indices)
     return clusters
-
 @jit(nopython=True, cache=True)
 def _process_cluster_adaptive_numba(cluster, num_models_active):
     if len(cluster) == 0: return None
@@ -333,7 +352,6 @@ def _process_cluster_adaptive_numba(cluster, num_models_active):
     elif num_contributing_models == 2: final_score = avg_score * 0.8
     else: final_score = avg_score * 1.0
     return np.array([fused_box_coords[0], fused_box_coords[1], fused_box_coords[2], fused_box_coords[3], final_score, float(winning_class)])
-
 def _filter_boxes_gpu(predictions_tensor, iou_diff_class_threshold):
     if predictions_tensor is None or predictions_tensor.shape[0] == 0: return []
     sorted_indices = predictions_tensor[:, 4].argsort(descending=True); preds_sorted = predictions_tensor[sorted_indices]
@@ -345,7 +363,6 @@ def _filter_boxes_gpu(predictions_tensor, iou_diff_class_threshold):
         overlap_mask = iou[0] > iou_diff_class_threshold; suppress_mask = different_class_mask & overlap_mask
         keep_indices[i+1:][suppress_mask] = False
     return preds_sorted[keep_indices].cpu().tolist()
-
 def inference_and_draw(model_object, is_yolov9_original, image_pil, image_bgr, params):
     conf_threshold, iou_same_class_threshold, iou_diff_class_threshold, _, box_thickness, class_colors_str = params; t_total_start = time.perf_counter()
     boxes_after_nms_tensor, names = None, model_object.names
@@ -365,14 +382,14 @@ def inference_and_draw(model_object, is_yolov9_original, image_pil, image_bgr, p
     final_boxes_for_single_model = _filter_boxes_gpu(boxes_after_nms_tensor, iou_diff_class_threshold)
     annotated_image = draw_custom_boxes(image_bgr, final_boxes_for_single_model, names, box_thickness, class_colors_str)
     return annotated_image, f"Tổng cộng: {time.perf_counter() - t_total_start:.3f} giây", final_boxes_for_single_model, names
-
 def process_single_model(model_obj, is_original, image_pil, image_bgr, params, result_list, index):
     if model_obj is None: result_list[index] = (None, "Chưa chạy", [], {}); return
     try:
         result_list[index] = inference_and_draw(model_obj, is_original, image_pil, image_bgr, params)
     except Exception as e:
         print(f"Lỗi khi suy luận model {index+1}: {e}"); result_list[index] = (image_bgr.copy(), f"Lỗi: {e}", [], {})
-
+        
+# --- LOGIC OCR ---
 def get_ocr_model(device_mode):
     global OCR_MODELS
     device_key = 'cuda' if device_mode == 'GPU' and torch.cuda.is_available() else 'cpu'
@@ -397,6 +414,7 @@ def get_manga_ocr_model(device_mode):
     return model
 
 def _is_word_in_box(word_box, text_box, threshold=0.5):
+    """Kiểm tra xem một 'word_box' có nằm trong 'text_box' hay không."""
     x1_inter = max(word_box[0], text_box[0]); y1_inter = max(word_box[1], text_box[1])
     x2_inter = min(word_box[2], text_box[2]); y2_inter = min(word_box[3], text_box[3])
     inter_area = max(0.0, x2_inter - x1_inter) * max(0.0, y2_inter - y1_inter)
@@ -468,6 +486,7 @@ def run_manga_ocr_on_boxes(image_np_bgr, final_boxes_from_ensemble, model_names,
     return final_boxes_from_ensemble, ocr_visualization_image, "\n---\n".join(ocr_full_text_output), logs
 
 def create_mask_from_bboxes(image_shape, bboxes):
+    """Tạo một mask nhị phân từ danh sách bounding box."""
     mask = np.zeros((image_shape[0], image_shape[1]), dtype=np.uint8)
     if not bboxes:
         return mask
@@ -477,6 +496,7 @@ def create_mask_from_bboxes(image_shape, bboxes):
     return mask
 
 def create_difference_mask(img_raw, img_clean, blur_level, min_area, cleanup_level):
+    """Tạo mask từ sự khác biệt pixel (Logic từ test.py)."""
     h, w, _ = img_raw.shape
     img_clean_resized = cv2.resize(img_clean, (w, h))
     gray_raw = cv2.cvtColor(img_raw, cv2.COLOR_BGR2GRAY)
@@ -500,6 +520,7 @@ def create_difference_mask(img_raw, img_clean, blur_level, min_area, cleanup_lev
     return final_mask
 
 def feather_mask(mask, expand_size, feather_amount):
+    """Làm mịn và mở rộng viền mask (Logic từ test.py)."""
     expand_size = expand_size + 1 if expand_size % 2 == 0 else expand_size
     feather_amount = feather_amount + 1 if feather_amount % 2 == 0 else feather_amount
     if expand_size > 1:
@@ -514,6 +535,7 @@ def feather_mask(mask, expand_size, feather_amount):
     return feathered_mask
 
 def create_feathered_overlay(img_raw, img_clean, feathered_mask):
+    """Tạo ảnh overlay từ mask đã làm mịn (Logic từ test.py)."""
     h, w, _ = img_raw.shape
     img_clean_resized = cv2.resize(img_clean, (w, h))
     alpha = cv2.cvtColor(feathered_mask, cv2.COLOR_GRAY2BGR).astype(float) / 255.0
@@ -522,15 +544,37 @@ def create_feathered_overlay(img_raw, img_clean, feathered_mask):
     result_float = cv2.multiply(alpha, img_clean_float) + cv2.multiply(1.0 - alpha, img_raw_float)
     return result_float.astype(np.uint8)
 
+
+# <<< --- BẮT ĐẦU CẬP NHẬT --- >>>
 def run_mask_generation_pipeline(raw_img_np, clean_img_np, selected_bboxes, unselected_bboxes, params):
+    """
+    Hàm điều phối chính cho việc tạo mask kết hợp với logic loại trừ thông minh.
+    """
+    # 1. Tạo mask từ bbox của các class ĐƯỢC CHỌN
     yolo_mask_selected = create_mask_from_bboxes(raw_img_np.shape, selected_bboxes)
+
+    # 2. Tạo mask từ sự khác biệt pixel (như cũ)
     blur, min_area, cleanup = params['blur'], params['min_area'], params['cleanup']
     diff_mask = create_difference_mask(raw_img_np, clean_img_np, blur, min_area, cleanup)
+
+    # 3. BƯỚC MỚI: TẠO MASK LOẠI TRỪ TỪ CÁC CLASS KHÔNG ĐƯỢC CHỌN
+    # Tạo mask từ các bbox không được chọn
     yolo_mask_unselected = create_mask_from_bboxes(raw_img_np.shape, unselected_bboxes)
+    # Đảo ngược mask này: vùng không được chọn -> đen, còn lại -> trắng
     exclusion_mask = cv2.bitwise_not(yolo_mask_unselected)
+    
+    # Áp dụng loại trừ: chỉ giữ lại chênh lệch pixel NẾU nó không nằm trong vùng không được chọn
     diff_mask_exclusive = cv2.bitwise_and(diff_mask, exclusion_mask)
+
+    # 4. ÁP DỤNG PHÉP TOÁN BITWISE AND (giữa mask được chọn và mask chênh lệch đã loại trừ)
     combined_mask_unfeathered = cv2.bitwise_and(yolo_mask_selected, diff_mask_exclusive)
+
+    # 5. Áp dụng hiệu chỉnh (làm mịn, mở rộng) trên mask đã kết hợp
     expand, feather = params['expand'], params['feather']
     final_mask_feathered = feather_mask(combined_mask_unfeathered, expand, feather)
+
+    # 6. Tạo ảnh overlay cuối cùng để so sánh
     overlay_image = create_feathered_overlay(raw_img_np, clean_img_np, final_mask_feathered)
+
+    # Trả về các ảnh để hiển thị (thay diff_mask bằng diff_mask_exclusive)
     return yolo_mask_selected, diff_mask_exclusive, final_mask_feathered, overlay_image
