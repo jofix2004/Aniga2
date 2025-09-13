@@ -14,22 +14,17 @@ import base64
 from PIL import Image
 import io
 
-# Import các hàm xử lý và quản lý config
 import processing
 from processing import *
 import config_manager
 
-# Tải lại để chắc chắn có phiên bản mới nhất
 importlib.reload(config_manager)
 importlib.reload(processing)
 
-# --- TẢI CONFIG VÀ TẠO THƯ MỤC CACHE ---
 CONFIG = config_manager.load_config()
 MODEL_CACHE_DIR = "_model_cache"
 os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
 
-
-# --- CÁC HÀM XỬ LÝ CHO GIAO DIỆN ---
 def save_preset(name, wbf_iou, wbf_conf, final_conf, inter_iou, intra_iou):
     global CONFIG
     if not name.strip():
@@ -54,23 +49,24 @@ def load_preset(name):
         )
     return gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
 
-# --- HÀM ĐIỀU PHỐI CHÍNH ---
 def main_predict_flow(click_start_time, *args):
     log_messages = []
     t_internal_start = time.perf_counter()
     *inputs, state_model1, state_model2, state_model3, state_image, state_loaded_model1, state_loaded_model2, state_loaded_model3, state_text_bboxes, state_raw_image_for_masking = args
-    (model_path1, model_path2, model_path3, input_image,
+    (input_image,
      conf_threshold, iou_same_class_threshold, iou_diff_class_threshold,
      device_mode, box_thickness, class_colors_str, is_yolov9_original,
-     enable_ensemble, wbf_iou_thr, wbf_skip_box_thr, final_conf_threshold, 
+     enable_ensemble, wbf_iou_thr, wbf_skip_box_thr, final_conf_threshold,
      ensemble_inter_class_iou_thr, ensemble_intra_group_iou_thr,
      ocr_mode
     ) = inputs
     
-    model_files = [m.name if m else s for m, s in zip([model_path1, model_path2, model_path3], [state_model1, state_model2, state_model3])]
     current_image_pil = input_image if input_image else state_image
-
-    # <<< THAY ĐỔI: Khởi tạo biến lưu bbox dưới dạng dictionary >>>
+    
+    # Sử dụng đường dẫn model cố định đã được tải về
+    project_dir = "/content/Aniga2"
+    model_files = [os.path.join(project_dir, "model1.pt"), os.path.join(project_dir, "model2.pt"), os.path.join(project_dir, "model3.pt")]
+    
     bboxes_for_state = {}
     
     if current_image_pil is None:
@@ -81,8 +77,8 @@ def main_predict_flow(click_start_time, *args):
     current_image_np_bgr = cv2.cvtColor(np.array(current_image_pil), cv2.COLOR_RGB2BGR)
     log_messages.append(f"<b>[Bước 1] Chuẩn bị & Tải ảnh:</b> {time.perf_counter() - t_internal_start:.4f}s")
     
-    # ... (Phần tải model và chạy suy luận đơn giữ nguyên) ...
     params_single_model = (conf_threshold, iou_same_class_threshold, iou_diff_class_threshold, device_mode, box_thickness, class_colors_str)
+    
     t_step_start = time.perf_counter()
     loaded_models = [state_loaded_model1, state_loaded_model2, state_loaded_model3]
     models_to_run = [None, None, None]
@@ -92,26 +88,23 @@ def main_predict_flow(click_start_time, *args):
         try:
             device_str = 'cuda:0' if device_mode == 'GPU' and torch.cuda.is_available() else 'cpu'
             target_device_obj = torch.device(device_str)
-            if cached_model is None or cached_model.get('temp_path') != temp_model_path or cached_model.get('device') != device_mode:
-                model_filename = os.path.basename(temp_model_path)
-                persistent_model_path = os.path.join(MODEL_CACHE_DIR, f"cached_model_{i+1}_{model_filename}")
-                if not os.path.exists(persistent_model_path) or not filecmp.cmp(temp_model_path, persistent_model_path, shallow=False):
-                    shutil.copy(temp_model_path, persistent_model_path)
+            if cached_model is None or cached_model.get('path') != temp_model_path or cached_model.get('device') != device_mode:
                 log_messages.append(f"- Tải/Di chuyển Model {i+1} vào bộ nhớ ({device_mode})")
                 t_load_start = time.perf_counter()
                 is_original = (i == 1 and is_yolov9_original)
                 if is_original:
-                    model_obj = DetectMultiBackend(persistent_model_path, device=target_device_obj, data=ROOT / 'data/coco.yaml')
+                    model_obj = DetectMultiBackend(temp_model_path, device=target_device_obj, data=ROOT / 'data/coco.yaml')
                 else:
-                    model_obj = YOLO(persistent_model_path)
+                    model_obj = YOLO(temp_model_path)
                     model_obj.to(target_device_obj)
-                loaded_models[i] = {'path': persistent_model_path, 'temp_path': temp_model_path, 'model': model_obj, 'device': device_mode}
+                loaded_models[i] = {'path': temp_model_path, 'model': model_obj, 'device': device_mode}
                 log_messages.append(f"  + Hoàn thành sau: {time.perf_counter() - t_load_start:.4f}s")
             if loaded_models[i]: models_to_run[i] = loaded_models[i]['model']
         except Exception as e:
             log_messages.append(f"<p style='color: red;'>- Lỗi nghiêm trọng ở Model {i+1}: {e}</p>")
             loaded_models[i] = None; continue
     log_messages.append(f"<b>[Bước 2] Tổng thời gian Tải/Cache/Di chuyển Models:</b> {time.perf_counter() - t_step_start:.4f}s")
+
     t_step_start = time.perf_counter()
     final_results = [(None, "Chưa chạy", [], {})] * 3
     model_infos = [(models_to_run[0], False), (models_to_run[1], is_yolov9_original), (models_to_run[2], False)]
@@ -136,7 +129,6 @@ def main_predict_flow(click_start_time, *args):
             final_boxes, pipeline_logs = pipeline.process(filtered_results_for_ensemble, device_mode)
             log_messages.append("--- Log Chi tiết Pipeline ---"); log_messages.extend(pipeline_logs)
             ensemble_time_str = pipeline_logs[0].replace("<b>", "").replace("</b>", "")
-
             if ocr_mode != "Không bật":
                 log_messages.append(f"--- Log Chi tiết OCR ({ocr_mode}) ---")
                 if ocr_mode == "Tiếng Anh (Tinh chỉnh box)":
@@ -145,8 +137,6 @@ def main_predict_flow(click_start_time, *args):
                     final_boxes, ocr_viz_image, ocr_text_output, ocr_logs = run_manga_ocr_on_boxes(current_image_np_bgr, final_boxes, combined_names, device_mode)
                 log_messages.extend(ocr_logs)
             ensemble_image = draw_custom_boxes(current_image_np_bgr, final_boxes, combined_names, box_thickness, class_colors_str)
-            
-            # <<< THAY ĐỔI: Trích xuất bbox cho các class 'text' và 'text2' vào dictionary >>>
             maskable_classes_to_save = ["text", "text2"]
             for class_name in maskable_classes_to_save:
                 class_id = next((cid for cid, name in combined_names.items() if name == class_name), -1)
@@ -154,7 +144,6 @@ def main_predict_flow(click_start_time, *args):
                     class_bboxes = [box for box in final_boxes if box[5] == class_id]
                     if class_bboxes:
                         bboxes_for_state[class_name] = class_bboxes
-            
             if bboxes_for_state:
                 found_classes_str = ", ".join(bboxes_for_state.keys())
                 log_messages.append(f"<b style='color: green;'>[Lưu trữ] Đã lưu trữ bbox cho các class: {found_classes_str}.</b>")
@@ -179,13 +168,13 @@ def main_predict_flow(click_start_time, *args):
     final_log_str = "<br>".join(log_messages)
     final_ocr_viz_image = cv2.cvtColor(ocr_viz_image, cv2.COLOR_BGR2RGB) if ocr_viz_image is not None else None
     
-    yield (*images, *times, final_log_str, *model_files, current_image_pil, *loaded_models, final_ocr_viz_image, ocr_text_output, bboxes_for_state, current_image_pil)
+    dummy_model_paths = [state_model1, state_model2, state_model3] # Cần để giữ cấu trúc output
+    yield (*images, *times, final_log_str, *dummy_model_paths, current_image_pil, *loaded_models, final_ocr_viz_image, ocr_text_output, bboxes_for_state, current_image_pil)
 
 def main_flow_wrapper(*args):
     click_start_time = time.perf_counter()
     yield from main_predict_flow(click_start_time, *args)
 
-# <<< --- BẮT ĐẦU CẬP NHẬT --- >>>
 def generate_combined_mask_flow(clean_pil_image, raw_pil_image, all_saved_bboxes, selected_classes, blur, min_area, cleanup, expand, feather):
     if not clean_pil_image:
         gr.Warning("Vui lòng tải lên 'Ảnh đã xóa Text/SFX'.")
@@ -200,10 +189,9 @@ def generate_combined_mask_flow(clean_pil_image, raw_pil_image, all_saved_bboxes
         gr.Warning("Vui lòng chọn ít nhất một class ('text' hoặc 'text2') để tạo mask.")
         return None, None, None, None, None
 
-    # Phân loại bbox thành 2 nhóm: được chọn và không được chọn
     selected_bboxes = []
     unselected_bboxes = []
-    all_maskable_classes = ["text", "text2"] # Định nghĩa các class có thể tạo mask
+    all_maskable_classes = ["text", "text2"]
 
     for class_name in all_maskable_classes:
         if class_name in all_saved_bboxes:
@@ -220,7 +208,6 @@ def generate_combined_mask_flow(clean_pil_image, raw_pil_image, all_saved_bboxes
     clean_np_bgr = cv2.cvtColor(np.array(clean_pil_image), cv2.COLOR_RGB2BGR)
     params = {'blur': blur, 'min_area': min_area, 'cleanup': cleanup, 'expand': expand, 'feather': feather}
     
-    # Gọi pipeline xử lý mới với 2 danh sách bbox
     yolo_mask, diff_mask_exclusive, final_mask, overlay_image = processing.run_mask_generation_pipeline(
         raw_np_bgr, clean_np_bgr, selected_bboxes, unselected_bboxes, params
     )
@@ -246,27 +233,25 @@ def generate_combined_mask_flow(clean_pil_image, raw_pil_image, all_saved_bboxes
     </button>
     """
     return yolo_mask, diff_mask_exclusive, final_mask, overlay_image_rgb, gr.update(value=interactive_html)
-# ---- GIAO DIỆN GRADIO ----
+
 is_gpu_available = torch.cuda.is_available()
 
 with gr.Blocks(theme=gr.themes.Soft(), css="footer {display: none !important;}") as demo:
     state_model1, state_model2, state_model3, state_image = gr.State(), gr.State(), gr.State(), gr.State()
     state_loaded_model1, state_loaded_model2, state_loaded_model3 = gr.State(), gr.State(), gr.State()
-    # <<< THAY ĐỔI: State lưu bbox dưới dạng dictionary >>>
     state_text_bboxes = gr.State({})
     state_raw_image_for_masking = gr.State()
     default_colors_json = '{"b1":"#d62728","b2":"#1f77b4","b3":"#2ca02c","b4":"#ff7f0e","b5":"#9467bd","text":"#8c564b","text2":"#e377c2","text3":"#17becf"}'
     
     gr.Markdown("# Chương trình Test, So sánh và Ensemble các mô hình YOLO")
     with gr.Tabs():
-        # ... (Tab "Cài đặt chung" và "Ensemble" giữ nguyên) ...
         with gr.TabItem("Cài đặt chung & Xử lý đơn model"):
             single_model_defaults = CONFIG['single_model_defaults']
             with gr.Row():
                 with gr.Column(scale=2):
                     gr.Markdown("#### **Thông số xử lý cho từng model**"); conf_threshold = gr.Slider(0.0, 1.0, value=single_model_defaults['conf_threshold'], step=0.05, label="Ngưỡng tự tin (Confidence)"); iou_same_class_threshold = gr.Slider(0.0, 1.0, value=single_model_defaults['iou_same_class_threshold'], step=0.05, label="Ngưỡng NMS (Cùng Class)"); iou_diff_class_threshold = gr.Slider(0.0, 1.0, value=single_model_defaults['iou_diff_class_threshold'], step=0.05, label="Ngưỡng lọc (Khác Class)")
                 with gr.Column(scale=1):
-                    gr.Markdown("#### **Cài đặt hệ thống**"); device_mode = gr.Radio(["CPU", "GPU"], value="GPU" if is_gpu_available else "CPU", label="Chế độ xử lý", interactive=is_gpu_available); is_yolov9_original = gr.Checkbox(label="Model 2 là YOLOv9 gốc"); box_thickness = gr.Slider(1, 20, 2, step=1, label="Độ đậm của Box")
+                    gr.Markdown("#### **Cài đặt hệ thống**"); device_mode = gr.Radio(["CPU", "GPU"], value="GPU" if is_gpu_available else "CPU", label="Chế độ xử lý", interactive=is_gpu_available); is_yolov9_original = gr.Checkbox(label="Model 2 là YOLOv9 gốc", value=True, visible=False); box_thickness = gr.Slider(1, 20, 2, step=1, label="Độ đậm của Box")
             with gr.Row():
                 with gr.Column(scale=2): class_colors_str = gr.Textbox(label="Bảng màu tùy chỉnh (JSON)", value=default_colors_json, lines=3)
                 with gr.Column(scale=1): color_preview_display = gr.Markdown(label="Xem trước màu", value=processing.update_color_preview(default_colors_json))
@@ -279,23 +264,18 @@ with gr.Blocks(theme=gr.themes.Soft(), css="footer {display: none !important;}")
                     gr.Markdown("#### **Thông số Pipeline Ensemble**"); wbf_iou_thr = gr.Slider(0.0, 1.0, value=ensemble_defaults['wbf_iou_thr'], step=0.05, label="Ngưỡng IoU cho WBF (Gom cụm)"); wbf_skip_box_thr = gr.Slider(0.0, 1.0, value=ensemble_defaults['wbf_skip_box_thr'], step=0.01, label="Ngưỡng Tin cậy để gộp (Skip Thr)"); final_conf_threshold = gr.Slider(0.0, 1.0, value=ensemble_defaults['final_conf_threshold'], step=0.05, label="Ngưỡng Tin cậy CUỐI CÙNG"); ensemble_inter_class_iou_thr = gr.Slider(0.0, 1.0, value=ensemble_defaults['ensemble_inter_class_iou_thr'], step=0.05, label="Ngưỡng Lọc GIỮA các Nhóm"); ensemble_intra_group_iou_thr = gr.Slider(0.0, 1.0, value=ensemble_defaults['ensemble_intra_group_iou_thr'], step=0.05, label="Ngưỡng Lọc TRONG Nội Nhóm")
                 with gr.Column(scale=1):
                     gr.Markdown("#### **Quản lý Preset**"); preset_name = gr.Textbox(label="Tên Preset để lưu"); save_preset_btn = gr.Button("Lưu Preset hiện tại", variant="primary"); preset_dropdown = gr.Dropdown(label="Tải một Preset", choices=list(CONFIG['presets'].keys()), interactive=True)
-
         with gr.TabItem("Tạo Mask Chênh Lệch & Tinh Chỉnh") as mask_gen_tab:
             gr.Markdown("### Quy trình tạo Mask kết hợp (YOLO + Chênh lệch Pixel)")
-            # ... (Phần mô tả giữ nguyên) ...
             gr.Markdown("1.  Chạy phân tích ở các tab trước để có được bounding box cho class `text` (đã được lưu tự động).\n2.  Tải lên **Ảnh đã xóa Text/SFX** tương ứng với ảnh gốc đã dùng.\n3.  Tinh chỉnh các thông số và nhấn nút 'Tạo Mask Kết Hợp'.")
             with gr.Row():
                 with gr.Column(scale=1):
                     clean_image_upload = gr.Image(type="pil", label="Ảnh đã xóa Text/SFX")
-                    
-                    # <<< THÊM MỚI: Ô tick chọn class >>>
                     mask_classes_selector = gr.CheckboxGroup(
                         ["text", "text2"], 
                         label="Chọn class để tạo Mask YOLO", 
                         value=["text"],
                         info="Chọn các class có bbox sẽ được dùng để tạo mask."
                     )
-                    
                     mask_gen_button = gr.Button("Tạo Mask Kết Hợp", variant="primary")
                 with gr.Column(scale=2):
                     with gr.Accordion("Cài đặt hiệu chỉnh Mask", open=True):
@@ -314,18 +294,19 @@ with gr.Blocks(theme=gr.themes.Soft(), css="footer {display: none !important;}")
                     mask_output_overlay_final = gr.Image(label="4. Ảnh Overlay (Kết quả cuối)")
                  with gr.Column():
                     gr.Markdown("#### 5. So sánh tương tác"); mask_interactive_output = gr.HTML()
-
         with gr.TabItem("Kết quả OCR") as ocr_tab:
-            # ... (Giữ nguyên) ...
             gr.Markdown("Tab này hiển thị kết quả từ pipeline OCR. Ảnh bên trái hiển thị các vùng được xử lý bởi OCR. Textbox bên phải hiển thị nội dung văn bản được trích xuất từ các box 'text'.")
             with gr.Row():
-                output_image_ocr = gr.Image(label="Ảnh trực quan hóa OCR"); ocr_text_output = gr.Textbox(label="Nội dung văn bản được trích xuất", lines=15, interactive=True)
+                output_image_ocr = gr.Image(label="Ảnh trực quan hóa OCR")
+                ocr_text_output = gr.Textbox(label="Nội dung văn bản được trích xuất", lines=15, interactive=True)
     
     with gr.Row():
         input_image = gr.Image(type="pil", label="Ảnh đầu vào")
         with gr.Column():
-            model_path1 = gr.File(label="Mô hình 1"); model_path2 = gr.File(label="Mô hình 2"); model_path3 = gr.File(label="Mô hình 3")
-            
+            gr.Markdown("✅ **Model 1:** `v8-m3.pt` (Đã tải)")
+            gr.Markdown("✅ **Model 2:** `v9-c2_fp16.pt` (YOLOv9 gốc - Đã tải)")
+            gr.Markdown("✅ **Model 3:** `v11-m3.pt` (Đã tải)")
+
     run_button = gr.Button("Chạy Phân Tích", variant="primary")
     gr.Markdown("--- \n ### **Kết quả dự đoán**")
     
@@ -338,18 +319,16 @@ with gr.Blocks(theme=gr.themes.Soft(), css="footer {display: none !important;}")
             
     with gr.Accordion("Báo cáo Thời gian Chi tiết", open=False): log_output = gr.Markdown("Nhấn 'Chạy Phân Tích' để xem báo cáo.")
     
-    # Event Handlers
     enable_ensemble.change(lambda x: gr.update(visible=x), inputs=enable_ensemble, outputs=ensemble_col)
     class_colors_str.change(fn=processing.update_color_preview, inputs=class_colors_str, outputs=color_preview_display)
     save_preset_btn.click(fn=save_preset, inputs=[preset_name, wbf_iou_thr, wbf_skip_box_thr, final_conf_threshold, ensemble_inter_class_iou_thr, ensemble_intra_group_iou_thr], outputs=[preset_dropdown])
     preset_dropdown.change(fn=load_preset, inputs=[preset_dropdown], outputs=[wbf_iou_thr, wbf_skip_box_thr, final_conf_threshold, ensemble_inter_class_iou_thr, ensemble_intra_group_iou_thr])
     
-    inputs_list = [ model_path1, model_path2, model_path3, input_image, conf_threshold, iou_same_class_threshold, iou_diff_class_threshold, device_mode, box_thickness, class_colors_str, is_yolov9_original, enable_ensemble, wbf_iou_thr, wbf_skip_box_thr, final_conf_threshold, ensemble_inter_class_iou_thr, ensemble_intra_group_iou_thr, ocr_mode ]
+    inputs_list = [ input_image, conf_threshold, iou_same_class_threshold, iou_diff_class_threshold, device_mode, box_thickness, class_colors_str, is_yolov9_original, enable_ensemble, wbf_iou_thr, wbf_skip_box_thr, final_conf_threshold, ensemble_inter_class_iou_thr, ensemble_intra_group_iou_thr, ocr_mode ]
     states_list = [state_model1, state_model2, state_model3, state_image, state_loaded_model1, state_loaded_model2, state_loaded_model3, state_text_bboxes, state_raw_image_for_masking]
     outputs_list = [ output_image1, output_image2, output_image3, output_image4, time_label1, time_label2, time_label3, time_label4, log_output, state_model1, state_model2, state_model3, state_image, state_loaded_model1, state_loaded_model2, state_loaded_model3, output_image_ocr, ocr_text_output, state_text_bboxes, state_raw_image_for_masking]
     run_button.click(fn=main_flow_wrapper, inputs=inputs_list + states_list, outputs=outputs_list)
 
-    # <<< THAY ĐỔI: Cập nhật event handler cho nút tạo mask >>>
     mask_gen_button.click(
         fn=generate_combined_mask_flow,
         inputs=[clean_image_upload, state_raw_image_for_masking, state_text_bboxes, mask_classes_selector, mask_blur, mask_min_area, mask_cleanup, mask_expand, mask_feather],
@@ -357,4 +336,4 @@ with gr.Blocks(theme=gr.themes.Soft(), css="footer {display: none !important;}")
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(share=True, debug=True)
