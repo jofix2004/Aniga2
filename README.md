@@ -8,15 +8,6 @@
 
 [![Mở trong Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1uwWlg9bsheH25_C-q1iXdzJDKmREwSEy?usp=sharing)
 
-1.  Nhấp vào nút **"Mở trong Colab"** ở trên.
-2.  Trong môi trường Colab, hãy đảm bảo bạn đã bật GPU để có hiệu năng tốt nhất:
-    -   Trên thanh menu, chọn `Runtime` → `Change runtime type`.
-    -   Trong cửa sổ bật lên, chọn `T4 GPU` từ danh sách và nhấn `Save`.
-3.  Chạy các ô mã theo thứ tự:
-    -   Chạy **Ô 1** và đợi cho đến khi nó hoàn tất việc tải dự án và cài đặt các thư viện.
-    -   Sau đó, chạy **Ô 2** để khởi động ứng dụng.
-4.  Một đường link public (có dạng `...gradio.live`) sẽ xuất hiện. Nhấp vào đó để mở giao diện Aniga trong một tab mới.
-
 ## 💻 Local
 
 ### Yêu cầu tiên quyết
