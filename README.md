@@ -70,13 +70,3 @@ python app.py
 **5. Truy cập Giao diện**
 
 Mở trình duyệt của bạn và truy cập vào địa chỉ [http://127.0.0.1:7860](http://127.0.0.1:7860).
-
-## ⚙️ Cấu hình
-
-Bạn có thể tùy chỉnh sâu hơn các logic của pipeline hợp nhất bằng cách chỉnh sửa file `ensemble_config.json`. File này cho phép bạn:
--   Định nghĩa các nhóm lớp (`class_groups`) để áp dụng các quy tắc lọc riêng.
--   Bật/tắt logic lọc trong nội bộ nhóm.
--   Thay đổi các giá trị mặc định cho các ngưỡng xử lý.
--   **Xử lý hình ảnh:** OpenCV
--   **Tăng tốc hiệu năng:** Numba
--   **OCR:** python-doctr, manga-ocr````
